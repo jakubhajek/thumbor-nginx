@@ -1,0 +1,62 @@
+# docker stack deploy -c stack-tr-main.yml traefik --prune
+# jakub.hajek@cometari.com
+
+version: "3.7"
+services:
+  main:
+    image: traefik:v2.0.6
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+    networks:
+      - proxy-main
+    command:
+      - "--log.level=INFO"
+      - "--api"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.swarmmode=true"
+      - "--providers.docker.watch=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy-main"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.swarmModeRefreshSeconds=15s"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      - "--certificatesresolvers.le.acme.email=kuba@cometari.com"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+    volumes:
+      - "traefik-certificates:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.t.rule=Host(`srv.replace-me.pl`)" # Replace to your domain in order to access Traefik UI
+        - "traefik.http.routers.t.service=api@internal"
+        - "traefik.http.routers.t.tls.certresolver=le"
+        - "traefik.http.routers.t.entrypoints=websecure,web"
+        - "traefik.http.services.t.loadbalancer.server.port=8080"
+        - "traefik.http.services.t.loadbalancer.passhostheader=true"
+        - "traefik.http.routers.t.middlewares=authtraefik"
+        # Use Bcrypt to create password; httpasswd -B
+        - "traefik.http.middlewares.authtraefik.basicauth.users=admin:$$2y$$05$$1OX5jZ1Kpm/iVKE8tgUhu.STmPkgi0lLxVeP5yEcRioFdV4mcgdTu"
+        - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+        - "traefik.http.routers.http-catchall.entrypoints=web"
+        - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+        - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+networks:
+  proxy-main:
+    driver: overlay
+    attachable: true
+    name: proxy-main
+
+volumes:
+  traefik-certificates:

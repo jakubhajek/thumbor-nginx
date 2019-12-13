@@ -1,0 +1,152 @@
+# docker stack deploy -c stack-image-processing.yml images --prune
+# jakub.hajek@cometari.com
+
+version: "3.7"
+
+networks:
+  proxy-main:
+    external: true
+
+services:
+  thumbor:
+    image: apsl/thumbor
+    environment:
+      - SECURITY_KEY=strong-secret-key
+      - ALLOW_UNSAFE_URL=False
+    healthcheck:
+      test: wget --quiet --tries=1 --spider http://localhost:8000/healthcheck || exit 1
+      interval: 45s
+      timeout: 5s
+      retries: 2
+      start_period: 10s
+    networks:
+      - proxy-main
+    deploy:
+      placement:
+        preferences:
+          - spread: node.id
+      mode: replicated
+      replicas: 1
+      update_config:
+        failure_action: rollback
+        parallelism: 1
+        delay: 30s
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 10
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 512M
+  # nginx upload image via webdav and GET original URL
+  ul:
+    image: nginx:1.17
+    healthcheck:
+      test: wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 2
+      start_period: 5s
+    configs:
+      - source: nginx-config-upload
+        target: /etc/nginx/nginx.conf
+    networks:
+      - proxy-main
+    volumes:
+      - "images_rw:/images"
+    deploy:
+      placement:
+        preferences:
+          - spread: node.id
+      mode: replicated
+      replicas: 2
+      update_config:
+        failure_action: rollback
+        parallelism: 1
+        delay: 30s
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 10
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.o4static.rule=Host(`orig.replace-me.pl`)" # Replace with your own domain
+        - "traefik.http.routers.o4static.tls.certresolver=le"
+        - "traefik.http.routers.o4static.entrypoints=websecure"
+        - "traefik.http.services.o4static.loadbalancer.server.port=80"
+        - "traefik.http.services.o4static.loadbalancer.passhostheader=true"
+  # nginx get image and scale with thumbor
+  dl:
+    image: nginx:1.17
+    healthcheck:
+      test: wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 2
+      start_period: 5s
+    networks:
+      - proxy-main
+    configs:
+      - source: nginx-config-download
+        target: /etc/nginx/nginx.conf
+    volumes:
+      - "images_ro:/images"
+    deploy:
+      placement:
+        preferences:
+          - spread: node.id
+        constraints:
+          - node.labels.processing-images==true
+      mode: replicated
+      replicas: 2
+      update_config:
+        failure_action: rollback
+        parallelism: 1
+        delay: 30s
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 10
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.img4static.rule=Host(`get.replace-me.pl`)" # Replace with your own domain
+        - "traefik.http.routers.img4static.tls.certresolver=le"
+        - "traefik.http.routers.img4static.entrypoints=websecure"
+        - "traefik.http.services.img4static.loadbalancer.server.port=80"
+        - "traefik.http.services.img4static.loadbalancer.passhostheader=true"
+
+configs:
+  nginx-config-upload:
+    name: nginx-config-upload-${NGINX-CFG-UL:-1}
+    file: ./image-processing/nginx-config-upload.conf
+  nginx-config-download:
+    name: nginx-config-download-${NGINX-CFG-DL:-1}
+    file: ./image-processing/nginx-config-dl.conf
+
+# If you are going to use NFS than update the details accordingly or use local volumes instead of that.
+volumes:
+  images_ro:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=10.16.104.4,ro
+      device: :/zpool-1/images
+
+  images_rw:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=10.16.104.4,rw
+      device: :/zpool-1/images
